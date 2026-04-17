@@ -72,6 +72,24 @@ def extract_coordinates_from_url(url: str) -> tuple[float, float]:
     except Exception:
         return None, None
 
+def generate_grid(start_lat: float, start_lon: float, end_lat: float, end_lon: float, step: float) -> list[tuple[float, float]]:
+    """Generates an inclusive grid of (latitude, longitude) coordinate pairs."""
+    grid = []
+    min_lat, max_lat = min(start_lat, end_lat), max(start_lat, end_lat)
+    min_lon, max_lon = min(start_lon, end_lon), max(start_lon, end_lon)
+    
+    current_lat = min_lat
+    # Add a small epsilon to avoid floating point precision issues avoiding the last step
+    epsilon = step / 100
+    while current_lat <= max_lat + epsilon:
+        current_lon = min_lon
+        while current_lon <= max_lon + epsilon:
+            grid.append((round(current_lat, 6), round(current_lon, 6)))
+            current_lon += step
+        current_lat += step
+        
+    return grid
+
 def dismiss_consent_popup(page):
     """Dismiss Google consent/cookie popup if it appears"""
     consent_selectors = [
@@ -97,6 +115,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-s", "--search", type=str)
     parser.add_argument("-t", "--total", type=int)
+    parser.add_argument("--grid", type=str, help="Comma separated lat_start,lon_start,lat_end,lon_end")
+    parser.add_argument("--step", type=float, default=0.01, help="Grid step size")
+    parser.add_argument("--headless", action="store_true", help="Run browser in background for maximum speed")
     args = parser.parse_args()
     
     if args.search:
@@ -110,19 +131,44 @@ def main():
 
     if not args.search:
         search_list = []
-        input_file_name = 'input.txt'
+        input_file_name = 'input.csv'
         input_file_path = os.path.join(os.getcwd(), input_file_name)
         if os.path.exists(input_file_path):
+            import csv
             with open(input_file_path, 'r') as file:
-                search_list = [line.strip() for line in file.readlines() if line.strip()]
-                
+                reader = csv.DictReader(file)
+                for row in reader:
+                    for key in row.keys():
+                        if key.lower() in ('category', 'search'):
+                            val = row[key].strip()
+                            if val:
+                                search_list.append(val)
+                            break
+                            
         if len(search_list) == 0:
-            print('Error occured: You must either pass the -s search argument, or add searches to input.txt')
+            print('Error occured: You must either pass the -s search argument, or add searches to input.csv')
             sys.exit()
     
+    grid_coords = []
+    if args.grid:
+        try:
+            slat, slon, elat, elon = map(float, args.grid.split(','))
+            grid_coords = generate_grid(slat, slon, elat, elon, args.step)
+            print(f"  [Info] Generated {len(grid_coords)} grid points.")
+        except Exception as e:
+            print(f"Error parsing grid arguments: {e}")
+            sys.exit(1)
+    else:
+        grid_coords = [None]
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        page = browser.new_page(locale="en-GB")
+        browser = p.chromium.launch(headless=args.headless)
+        context = browser.new_context(locale="en-GB")
+        
+        # Block images, fonts, and media to save massive amounts of network bandwidth and speed up rendering
+        context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
+        
+        page = context.new_page()
         # Global default timeout - 60 seconds
         page.set_default_timeout(60000)
 
@@ -150,17 +196,28 @@ def main():
 
         business_list = BusinessList()
 
-        for search_for_index, search_for in enumerate(search_list):
-            print(f"-----\n{search_for_index} - {search_for}".strip())
+        search_tasks = []
+        for search_for in search_list:
+            for coord in grid_coords:
+                search_tasks.append((search_for, coord))
 
-            # Wait for the search box to be visible and fill it
-            search_box = page.locator('//input[@name="q"]')
-            search_box.wait_for(state="visible", timeout=60000)
-            search_box.fill(search_for)
-            page.wait_for_timeout(3000)
+        for task_idx, (search_for, coord) in enumerate(search_tasks):
+            print(f"-----\n{task_idx} - {search_for}" + (f" (Grid: {coord[0]}, {coord[1]})" if coord else ""))
 
-            page.keyboard.press("Enter")
-            page.wait_for_timeout(5000)
+            if coord:
+                lat, lon = coord
+                map_url = f"https://www.google.com/maps/search/{search_for.replace(' ', '+')}/@{lat},{lon},15z"
+                page.goto(map_url, timeout=60000)
+                page.wait_for_timeout(1500)
+            else:
+                # Wait for the search box to be visible and fill it
+                search_box = page.locator('//input[@name="q"]')
+                search_box.wait_for(state="visible", timeout=60000)
+                search_box.fill(search_for)
+                page.wait_for_timeout(1000)
+    
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(2000)
 
             # Wait for results panel to load
             try:
@@ -180,7 +237,7 @@ def main():
 
             while True:
                 page.mouse.wheel(0, 10000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(1000)
 
                 current_count = page.locator(
                     '//a[contains(@href, "https://www.google.com/maps/place")]'
@@ -214,7 +271,7 @@ def main():
             for idx, listing in enumerate(listings):
                 try:                        
                     listing.click()
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(800)
 
                     name_attribute = 'h1.DUwDvf'
                     address_xpath = '//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]'
@@ -274,8 +331,12 @@ def main():
                     except Exception:
                         business.status_hours = ""
 
-                    business.category = search_for.split(' in ')[0].strip()
-                    business.location = search_for.split(' in ')[-1].strip()
+                    if ' in ' in search_for:
+                        business.category = search_for.split(' in ')[0].strip()
+                        business.location = search_for.split(' in ')[-1].strip()
+                    else:
+                        business.category = search_for.strip()
+                        business.location = "Grid Search"
                     business.latitude, business.longitude = extract_coordinates_from_url(page.url)
                     business.map_url = page.url
 

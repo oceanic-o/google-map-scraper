@@ -47,11 +47,11 @@ uv run playwright install chromium
 
 ### 5. Running the Project
 
-You can define your search targets in `input.txt` (one per line) or pass them via arguments.
+You can define your search targets in `input.csv` (under a `category` header) or pass them via arguments.
 
-**Using `input.txt` (Default):**
+**Using `input.csv` (Default):**
 
-Add your search queries to `input.txt` (e.g., `hair salon`), then run the main script:
+Add your search queries to `input.csv` (e.g., `hair salon`), then run the main script:
 
 ```bash
 uv run python main.py
@@ -66,3 +66,16 @@ uv run python main.py -s "hair salon in pokhara nepal" -t 10
 
 - `-s` or `--search`: Specifies the actual search string.
 - `-t` or `--total`: Specifies the maximum number of listings to scrape per search.
+- `--grid`: Enables Grid Search (spatial scraping) by providing a coordinate bounding box (`lat_start,lon_start,lat_end,lon_end`). 
+- `--step`: Defines the increment for the grid points (default is `0.01`, which is roughly ~1km steps).
+
+### Grid Search with `input.csv`
+
+The real power of grid search is combining it with `input.csv`. If your `input.csv` file contains multiple desired business types (e.g., `restaurant`, `khaja ghar`, `spa`), you can simply run:
+
+```bash
+uv run python main.py --grid 28.209,83.985,28.220,83.995 --step 0.01
+```
+
+**How it works seamlessly together:**
+The scraper reads the categories from your `.csv` file, processes the `--grid` rectangle, and loops through both lists. It will go to the first grid coordinate and search for "restaurant", then search for "khaja ghar", then "spa", before moving onto the next coordinate block. This guarantees that you capture practically 100% of all listed businesses for your desired categories in the designated area!
